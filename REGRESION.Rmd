@@ -331,7 +331,40 @@ varImp(modelo)
 
 ```
 
+¿Qué se concluye?
+🔸 1. La variable más influyente con diferencia es lstat
+Relacionada con nivel socioeconómico bajo.
 
+Tiene un impacto muy fuerte en el precio de las viviendas (lógica económica: mayor pobreza, menor valor de propiedad).
+
+🔸 2. rm también es muy importante
+Relación intuitiva: más habitaciones → mayor tamaño → mayor precio.
+
+🔸 3. Variables como crim, dis, nox son moderadamente importantes
+Factores de entorno (delincuencia, accesibilidad, contaminación) también afectan el valor, pero en menor medida.
+
+🔸 4. Variables con baja o nula importancia
+zn y chas prácticamente no fueron usadas por el modelo.
+
+Esto puede deberse a:
+
+Baja variabilidad en esos campos.
+
+Correlación con otras variables más influyentes.
+
+Su efecto es marginal dentro del espacio de predicción.
+
+¿Qué uso tiene esta información?
+Reducción de dimensionalidad: podrías ignorar las variables menos relevantes en modelos futuros.
+
+Interpretación: sabes qué factores están guiando la predicción.
+
+Justificación ante stakeholders: puedes explicar qué variables impactan más en los resultados.
+
+Análisis económico o urbano: puedes derivar hipótesis sobre los determinantes del precio de la vivienda.
+
+En resumen
+El modelo aprendió que los niveles socioeconómicos (lstat) y el tamaño de las viviendas (rm) son los principales motores del valor predicho. Factores como criminalidad, contaminación y educación tienen una influencia secundaria, y otras variables son prescindibles en este contexto.
 
 
 
