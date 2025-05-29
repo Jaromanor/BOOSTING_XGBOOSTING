@@ -83,17 +83,17 @@ head(datos)
 
 # PASO 3: Ingeniería de variables
 
-Sería excelente idea estimar primero un modelo arima para mirar los componentes autorregresivos (lag) y ajustar de mejor manera la ingeniería de las variables. También se puede revisar los residuales de arima e incluirlos en el modelo xgbooting como variable predictora
+Sería excelente idea estimar primero un modelo arima para mirar los componentes autorregresivos (lag) y ajustar de mejor manera la ingeniería de las variables. También se puede revisar los residuales de arima e incluirlos en el modelo xgbooting como variable predictora. Se puede usar también la diferencia entre valor actual y pasado.
 
 ```{r}
 # Crear variables de rezago y componentes temporales
 datos[, `:=`(
   lag1 = shift(pasajeros, 1),
   lag2 = shift(pasajeros, 2),
-  ma3 = frollmean(pasajeros, 3, align = "right"),
+  ma3 = frollmean(pasajeros, 3, align = "right"), # Media móvil de 3 meses
   mes = month(fecha),
   año = year(fecha),
-  target = shift(pasajeros, -1)
+  target = shift(pasajeros, -1) # Valor que quiero predecir: pasajeros del próximo mes
 )]
 
 datos <- na.omit(datos)
@@ -102,13 +102,25 @@ datos <- na.omit(datos)
 
 Aquí usamos:
 
-Lags (memoria temporal)
+Lags (memoria temporal): Usado para capturar la dependencia temporal inmediata.
 
-Media móvil
+Media móvil:
 
-Estacionalidad (mes, año)
+- Calcula el promedio de los últimos 3 meses, incluyendo el actual.
+- Suaviza la serie, útil para capturar tendencias locales.
+- align = "right" significa que la media se calcula con los valores que         terminan en el tiempo actual (no hacia adelante)
 
-Target: valor del mes siguiente
+Estacionalidad (mes, año): Captura estacionalidad mensual: por ejemplo, si hay más pasajeros en julio o diciembre. Captura tendencia a largo plazo: si hay un crecimiento estructural
+
+Target: valor del mes siguiente.
+
+- Desplaza los valores de pasajeros una posición hacia atrás.
+- Si hoy es enero, el target será el valor de febrero.
+
+datos <- na.omit(datos): Porque al usar shift() y frollmean(), las primeras filas no tienen valores suficientes para calcular los rezagos o la media.
+
+¿Para qué se hace todo esto?
+Para convertir una serie temporal univariada en un dataset tabular con múltiples variables predictoras, que se pueda usar con modelos de machine learning como xgboost, que no entienden el tiempo por sí mismos, pero sí aprenden muy bien de variables.
 
 
 # PASO 4: Separar entrenamiento y prueba
@@ -128,27 +140,60 @@ features <- c("lag1", "lag2", "ma3", "mes", "año")
 
 # PASO 5: Configurar trainControl con timeslice
 
+Se está configurando un objeto trainControl que indica que se usará una validación cruzada especial para series temporales, llamada timeslice.
+
+method = "timeslice":
+
+- A diferencia de cv o repeatedcv, no mezcla el orden temporal.
+- Parte los datos en ventanas secuenciales de entrenamiento y prueba,           respetando el tiempo.
+- Ideal para series temporales porque simula cómo se haría la predicción en la  práctica: solo usando el pasado para predecir el futuro.
+
 ```{r}
 ctrl <- trainControl(
   method = "timeslice",
-  initialWindow = 60,
-  horizon = 12,
-  fixedWindow = TRUE,
-  verboseIter = TRUE,
-  allowParallel = TRUE
+  initialWindow = 60, # Usa las primeras 60 observaciones para la primera iteración de entrenamiento.
+  horizon = 12, # En cada iteración, se prueba el modelo en los 12 siguientes registros (por ejemplo, 12 meses)
+  fixedWindow = TRUE, #Mantiene el tamaño del set de entrenamiento constante en cada iteración (60).
+  verboseIter = TRUE, # Muestra en pantalla el progreso de cada iteración de entrenamiento y validación.
+  allowParallel = TRUE #Permite que caret use paralelización si has registrado un clúster (como con doParallel).
 )
 
 ```
 
-Se usan ventanas móviles para simular la evolución temporal real. No hay mezcla de observaciones futuras en el entrenamiento.
+initialWindow = 60:
+
+Significa que el primer modelo se entrena con 60 filas del conjunto de datos ordenado cronológicamente. Por ejemplo: si tienes datos mensuales, eso equivale a 5 años de entrenamiento
+
+horizon = 12:
+
+El modelo entrenado con las 60 primeras observaciones se evalúa en las siguientes 12. Luego se mueve la ventana y repite.
+
+
+fixedWindow = TRUE
+
+Si fuera FALSE, el conjunto de entrenamiento se expandiría en cada iteración (cumulative training). TRUE imita un modelo rolling, que mantiene una “ventana móvil” fija.
+
+
+¿Por qué usar timeslice?
+Porque en series temporales no debes mezclar el pasado con el futuro durante el entrenamiento.
+Validaciones aleatorias como cv violan esta regla al barajar los datos.
+
+timeslice:
+
+Respeta el orden cronológico
+
+Simula cómo el modelo funcionaría en producción
+
+Permite evaluar la estabilidad del modelo en distintos tramos temporales
+
 
 # PASO 6: Entrenar modelo con caret + xgboost
 
 ```{r}
 set.seed(123)
 modelo <- train(
-  x = as.data.frame(datos_train[, ..features]),
-  y = datos_train$target,
+  x = as.data.frame(datos_train[, ..features]), # Este es el conjunto de variables predictoras (X).
+  y = datos_train$target, # Este es el vector de respuesta (variable objetivo).
   method = "xgbTree",
   trControl = ctrl,
   tuneLength = 5
@@ -156,7 +201,84 @@ modelo <- train(
 
 ```
 
-tuneLength = 5 busca 5 combinaciones distintas de hiperparámetros. Usamos validación cruzada temporal y paralelización.
+tuneLength = 5 
+
+Busca 5 combinaciones distintas de hiperparámetros. Esto activa la búsqueda automática de parámetros (no necesitas escribir un tuneGrid manual).caret selecciona aleatoriamente 5 combinaciones del espacio de parámetros relevantes para xgbTree, como:
+
+nrounds (número de árboles)
+
+eta (tasa de aprendizaje)
+
+max_depth (profundidad del árbol)
+
+gamma, colsample_bytree, subsample, min_child_weight
+
+
+Respecto a la salida:
+
+- eXtreme Gradient Boosting: Usaste el algoritmo XGBoost, en su variante basada en árboles de decisión para regresión.
+
+- 407 samples y 13 predictor: El modelo fue entrenado con 407 observaciones. Se usaron 13 variables predictoras (features), probablemente construidas a partir de lags, diferencias, medias móviles, estacionales, etc.
+
+- No pre-processing: caret no aplicó normalización, centrado, ni otra transformación automática a las variables. Esto está bien, porque XGBoost no necesita escalado: es robusto frente a magnitudes distintas.
+
+- Resampling: Cross-Validated (5 fold) - Summary of sample sizes: 327, 327, 325, 325, 324: Se usó validación cruzada con 5 particiones (5-fold CV). Cada fold entrenó con ~325-327 registros y validó con el resto.
+
+- Resampling results across tuning parameters: la tabla que muestra el desempeño del modelo para distintas combinaciones de hiperparámetros.
+
+| Parámetro          | Significado                                   |
+| ------------------ | --------------------------------------------- |
+| `eta`              | Tasa de aprendizaje (step size en boosting)   |
+| `max_depth`        | Profundidad máxima de cada árbol              |
+| `colsample_bytree` | Fracción de columnas usadas por cada árbol    |
+| `subsample`        | Fracción de muestras usadas en cada iteración |
+| `nrounds`          | Número de árboles (iteraciones de boosting)   |
+
+Todos estos hiperparámetros se probaron en distintas combinaciones para encontrar la mejor configuración.
+
+| Métrica    | Significado                                           |
+| ---------- | ----------------------------------------------------- |
+| `RMSE`     | Root Mean Squared Error (cuanto más bajo, mejor)      |
+| `Rsquared` | Coeficiente de determinación (cuanto más alto, mejor) |
+| `MAE`      | Mean Absolute Error (cuanto más bajo, mejor)          |
+
+RMSE was used to select the optimal model using the smallest value: El criterio de selección fue el menor RMSE promedio en validación cruzada. Esto es lo correcto cuando el objetivo es minimizar el error de predicción en una regresión.
+
+The final values used for the model were nrounds = 100, max_depth = 4, eta = 0.3, gamma =
+ 0, colsample_bytree = 0.8, min_child_weight = 1 and subsample = 1.: 
+ 
+ Esto significa que el modelo ganador:
+
+Usó 100 árboles.
+
+Árboles de profundidad moderada (4).
+
+Una tasa de aprendizaje de 0.3 (rápida).
+
+Todos los datos por iteración (subsample = 1) y 80% de las columnas (colsample_bytree = 0.8).
+
+gamma = 0: se permite dividir nodos sin restricción de ganancia mínima.
+
+min_child_weight = 1: nodos pequeños pueden dividirse.
+
+Esto indica que se eligió un modelo con:
+
+Alta flexibilidad
+
+Moderado riesgo de sobreajuste (profundidad 4, no excesiva)
+
+## ¿Y cómo se interpreta esto?
+El modelo encontró una configuración que balancea bien sesgo y varianza:
+
+RMSE bajo → buena precisión.
+
+R² alto (~0.86 en mejores casos) → buena capacidad explicativa.
+
+MAE razonable → errores absolutos promedio aceptables.
+
+Esto sugiere que el modelo está funcionando correctamente y aprendió bien la relación entre las variables predictoras y la variable objetivo.
+
+
 
 
 # PASO 7: Evaluar en conjunto de prueba
@@ -173,6 +295,16 @@ cat("Evaluación en conjunto de prueba:\n")
 cat("RMSE:", round(rmse_val, 2), "\nMAE:", round(mae_val, 2), "\n")
 
 ```
+
+newdata = as.data.frame(datos_test[, ..features]):
+
+- ..features es el vector con los nombres de columnas usadas como variables predictoras. "Toma los nombres de columna que están en el vector features, que está fuera del data.table, y selecciona esas columnas."
+
+- datos_test[, ..features] selecciona solo esas columnas del set de prueba.
+
+- as.data.frame(...) convierte la tabla a un formato que caret espera (si es data.table, puede fallar).
+
+
 # PASO 8: Visualizar resultados
 
 ```{r}
