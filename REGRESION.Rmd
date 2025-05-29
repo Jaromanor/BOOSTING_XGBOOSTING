@@ -9,3 +9,204 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+# CONTEXTO: Predicción de pasajeros aéreos mensuales (AirPassengers)
+
+Predecir el número de pasajeros del próximo mes utilizando las observaciones pasadas. Utilizaremos xgboost dentro de caret, con validación temporal (timeslice) y paralelización.
+
+# PASO 1: Cargar paquetes y configurar paralelización
+
+```{r}
+# Paquetes necesarios
+library(caret)
+library(data.table)
+library(lubridate)
+library(xgboost)
+library(doParallel)
+library(ggplot2)
+
+# Configurar paralelización
+n_cores <- parallel::detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+```
+
+1. n_cores <- parallel::detectCores() - 1
+Función: parallel::detectCores() detecta el número de núcleos de CPU disponibles en tu computadora.
+
+Operación: - 1 reserva un núcleo para evitar saturar el sistema (dejando uno libre para otras tareas).
+
+Resultado: n_cores guarda el número de núcleos a usar (ej. si tienes 8 núcleos, usará 7).
+
+
+2. cl <- makeCluster(n_cores)
+Función: makeCluster() (del paquete parallel) crea un cluster de procesos paralelos.
+
+Argumento: n_cores define cuántos procesos paralelos se iniciarán (uno por núcleo asignado).
+
+Resultado: cl es un objeto que representa el cluster de trabajadores (workers) listo para ejecutar tareas.
+
+3. registerDoParallel(cl)
+Función: registerDoParallel() (del paquete doParallel) registra el cluster (cl) para que paquetes como foreach usen paralelismo.
+
+Efecto: Las operaciones con foreach() ahora se distribuirán automáticamente entre los núcleos asignados.
+
+
+
+
+
+
+
+
+
+
+
+
+# PASO 2: Cargar y transformar los datos
+
+```{r}
+# Cargar datos reales
+data("AirPassengers")
+serie <- AirPassengers
+
+# Convertir a vector de fechas mensuales reales
+fecha <- seq(as.Date("1949-01-01"), by = "month", length.out = length(serie))
+
+# Crear data.table con fechas correctas
+datos <- data.table(
+  fecha = fecha,
+  pasajeros = as.numeric(serie)
+)
+
+head(datos)
+```
+
+# PASO 3: Ingeniería de variables
+
+Sería excelente idea estimar primero un modelo arima para mirar los componentes autorregresivos (lag) y ajustar de mejor manera la ingeniería de las variables. También se puede revisar los residuales de arima e incluirlos en el modelo xgbooting como variable predictora
+
+```{r}
+# Crear variables de rezago y componentes temporales
+datos[, `:=`(
+  lag1 = shift(pasajeros, 1),
+  lag2 = shift(pasajeros, 2),
+  ma3 = frollmean(pasajeros, 3, align = "right"),
+  mes = month(fecha),
+  año = year(fecha),
+  target = shift(pasajeros, -1)
+)]
+
+datos <- na.omit(datos)
+
+```
+
+Aquí usamos:
+
+Lags (memoria temporal)
+
+Media móvil
+
+Estacionalidad (mes, año)
+
+Target: valor del mes siguiente
+
+
+# PASO 4: Separar entrenamiento y prueba
+
+```{r}
+# Usamos 80% para entrenamiento, 20% para test (manteniendo orden)
+n_total <- nrow(datos)
+n_train <- floor(0.8 * n_total)
+
+datos_train <- datos[1:n_train]
+datos_test  <- datos[(n_train + 1):n_total]
+
+# Variables predictoras
+features <- c("lag1", "lag2", "ma3", "mes", "año")
+
+```
+
+# PASO 5: Configurar trainControl con timeslice
+
+```{r}
+ctrl <- trainControl(
+  method = "timeslice",
+  initialWindow = 60,
+  horizon = 12,
+  fixedWindow = TRUE,
+  verboseIter = TRUE,
+  allowParallel = TRUE
+)
+
+```
+
+Se usan ventanas móviles para simular la evolución temporal real. No hay mezcla de observaciones futuras en el entrenamiento.
+
+# PASO 6: Entrenar modelo con caret + xgboost
+
+```{r}
+set.seed(123)
+modelo <- train(
+  x = as.data.frame(datos_train[, ..features]),
+  y = datos_train$target,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneLength = 5
+)
+
+```
+
+tuneLength = 5 busca 5 combinaciones distintas de hiperparámetros. Usamos validación cruzada temporal y paralelización.
+
+
+# PASO 7: Evaluar en conjunto de prueba
+
+```{r}
+pred_test <- predict(modelo, newdata = as.data.frame(datos_test[, ..features]))
+
+# Métricas
+library(Metrics)
+rmse_val <- rmse(datos_test$target, pred_test)
+mae_val <- mae(datos_test$target, pred_test)
+
+cat("Evaluación en conjunto de prueba:\n")
+cat("RMSE:", round(rmse_val, 2), "\nMAE:", round(mae_val, 2), "\n")
+
+```
+# PASO 8: Visualizar resultados
+
+```{r}
+df_plot <- data.table(
+  fecha = datos_test$fecha,
+  real = datos_test$target,
+  pred = pred_test
+)
+
+ggplot(df_plot, aes(x = fecha)) +
+  geom_line(aes(y = real), color = "black") +
+  geom_line(aes(y = pred), color = "blue", linetype = "dashed") +
+  labs(title = "Predicción de pasajeros aéreos (conjunto de prueba)",
+       y = "Pasajeros", x = "Fecha") +
+  theme_minimal()
+
+```
+
+# PASO 9: Importancia de variables
+
+
+```{r}
+varImp(modelo)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
